@@ -179,8 +179,22 @@ func (c *LogClient) postAndParse(uri string, req interface{}, res interface{}) (
 	return resp, string(body), nil
 }
 
+func backoffForRetry(ctx context.Context, d int) error {
+	backoffTimer := time.NewTimer(time.Duration(d) * time.Second)
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-backoffTimer.C:
+		}
+	} else {
+		<-backoffTimer.C
+	}
+	return nil
+}
+
 // Attempts to add |chain| to the log, using the api end-point specified by
-// |path|. If provided context is passed before submission is complete an
+// |path|. If provided context expires before submission is complete an
 // error will be returned.
 func (c *LogClient) addChainWithRetry(ctx context.Context, path string, chain []ct.ASN1Cert) (*ct.SignedCertificateTimestamp, error) {
 	var resp addChainResponse
@@ -192,44 +206,39 @@ func (c *LogClient) addChainWithRetry(ctx context.Context, path string, chain []
 	backoffSeconds := 0
 	done := false
 	for !done {
-		backoffTimer := time.NewTimer(time.Duration(backoffSeconds) * time.Second)
 		if backoffSeconds > 0 {
 			log.Printf("Got %s, backing-off %d seconds.", httpStatus, backoffSeconds)
-			backoffSeconds = 0
 		}
-		if ctx != nil {
-			select {
-			case <-ctx.Done():
-				return nil, fmt.Errorf("Failed to submit chain, deadline passed")
-			case <-backoffTimer.C:
-			}
-		} else {
-			<-backoffTimer.C
+		err := backoffForRetry(ctx, backoffSeconds)
+		if err != nil {
+			return nil, err
+		}
+		if backoffSeconds > 0 {
+			backoffSeconds = 0
 		}
 		httpResp, errorBody, err := c.postAndParse(c.uri+path, &req, &resp)
 		if err != nil {
 			backoffSeconds = 10
-		} else {
-			switch {
-			case httpResp.StatusCode == 200:
-				done = true
-				break
-			case httpResp.StatusCode == 408:
-			case httpResp.StatusCode == 503:
-				fallthrough
-			case err != nil:
-				// Retry
-				backoffSeconds = 10
-				if retryAfter := httpResp.Header.Get("Retry-After"); retryAfter != "" {
-					if seconds, err := strconv.Atoi(retryAfter); err == nil {
-						backoffSeconds = seconds
-					}
-				}
-			default:
-				return nil, fmt.Errorf("Got HTTP Status %s: %s", httpResp.Status, errorBody)
-			}
-			httpStatus = httpResp.Status
+			continue
 		}
+		switch {
+		case httpResp.StatusCode == 200:
+			done = true
+			break
+		case httpResp.StatusCode == 408:
+			// request timeout, retry immediately
+		case httpResp.StatusCode == 503:
+			// Retry
+			backoffSeconds = 10
+			if retryAfter := httpResp.Header.Get("Retry-After"); retryAfter != "" {
+				if seconds, err := strconv.Atoi(retryAfter); err == nil {
+					backoffSeconds = seconds
+				}
+			}
+		default:
+			return nil, fmt.Errorf("Got HTTP Status %s: %s", httpResp.Status, errorBody)
+		}
+		httpStatus = httpResp.Status
 	}
 
 	rawLogID, err := base64.StdEncoding.DecodeString(resp.ID)
@@ -265,7 +274,7 @@ func (c *LogClient) AddPreChain(chain []ct.ASN1Cert) (*ct.SignedCertificateTimes
 }
 
 // AddChainWithContext adds the (DER represented) X509 |chain| to the log and
-// fails if the provided deadline is passed before the chain is submitted.
+// fails if the provided context expires before the chain is submitted.
 func (c *LogClient) AddChainWithContext(ctx context.Context, chain []ct.ASN1Cert) (*ct.SignedCertificateTimestamp, error) {
 	return c.addChainWithRetry(ctx, AddChainPath, chain)
 }

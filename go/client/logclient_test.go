@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -169,20 +170,16 @@ func TestAddChainWithContext(t *testing.T) {
 		started := time.Now()
 		sct, err := c.AddChainWithContext(deadline, chain)
 		took := time.Since(started)
-		margin := leeway
-		if margin > tc.expected {
-			margin = 0
-		}
-		if took > tc.expected+leeway || took < tc.expected-leeway {
+		if math.Abs(float64(took-tc.expected)) > float64(leeway) {
 			t.Fatalf("Submission took an unexpected length of time: %s, expected ~%s", took, tc.expected)
 		}
 		if tc.success && err != nil {
 			t.Fatalf("Failed to submit chain: %s", err)
-		} else if err == nil && !tc.success {
-			t.Fatalf("Expected AddChainWithContext to fail")
+		} else if !tc.success && err == nil {
+			t.Fatal("Expected AddChainWithContext to fail")
 		}
 		if tc.success && sct == nil {
-			t.Fatalf("Nil SCT returned")
+			t.Fatal("Nil SCT returned")
 		}
 	}
 }
